@@ -1,0 +1,1509 @@
+
+```{r}
+#library a bunch of packages we may (or may not) use - install them first if not installed already. 
+library(tidyverse)
+library(tmap)
+library(geojsonio)
+library(plotly)
+library(broom)
+library(mapview)
+library(sf)
+library(sp)
+library(spdep)
+library(car)
+library(fs)
+library(janitor)
+library(gstat)
+library(raster)
+```
+
+
+```{r}
+#read in some attribute data
+LSOA_B <- st_read(here::here("Birmingham.shp"))
+```
+
+
+```{r}
+head(LSOA_B)
+```
+```{r}
+# 读取 CSV 文件
+Birmingham_census <- read_csv("Birmingham_census.csv")
+```
+
+```{r}
+# 执行左连接
+LSOA_B <- left_join(LSOA_B, Birmingham_census, by = c("LSOA21CD" = "LSOA21CD"))
+
+```
+
+```{r}
+# 读取 CSV 文件
+Birmingham_bedroom <- read_csv("birmingham_bedroom.csv")
+```
+
+```{r}
+# 执行左连接
+LSOA_B <- left_join(LSOA_B, Birmingham_bedroom, by = c("LSOA21CD" = "LSOA21CD"))
+
+```
+
+
+
+```{r}
+LSOA_B<- rename(LSOA_B, Mean_price_B = Mean)
+```
+
+```{r}
+LSOA_B<- subset(LSOA_B, select= -c(LSOA21NMW, BNG_E, BNG_N, LAT, LONG, GlobalID))
+```
+
+```{r}
+LSOA_B$Mean_price_B[is.na(LSOA_B$Mean_price_B)] <- 0
+```
+
+#Kriging：Mean price 2021 Birmingham  （1.5min）
+```{r}
+# 定义克里金模型时忽略空值
+kriging_model_B <- gstat(formula = Mean_price_B ~ 1, data = na.omit(LSOA_B), model = vgm(1, "Sph", 900, 1))
+
+# 进行插值
+kriging_result_B <- predict(kriging_model_B, newdata = LSOA_B)
+
+```
+
+
+插值过的mean price 2021的列名为var1.pred
+然后合到shapefile:LSOA_B里，叫：Mean_price_filled_M
+
+```{r}
+# 将 Kriging 结果添加为新的 Mean_price 列
+LSOA_B$Mean_price_B <- kriging_result_B$var1.pred
+
+# 查看结果以确认更改
+head(LSOA_B)
+```
+
+```{r}
+LSOA_B<- rename(LSOA_B, Mean_price = Mean_price_B)
+```
+
+```{r}
+LSOA_B<- rename(LSOA_B, Mean_price_B = Mean_price_filled_B)
+```
+
+
+
+```{r}
+#calculate the centroids of all Wards in Birmingham
+coordsW_B <- LSOA_B%>%
+  st_centroid()%>%
+  st_geometry()
+
+plot(coordsW_B)
+```
+
+Adjacency Matrix
+```{r}
+LSOA_nb_B <- LSOA_B %>%
+  poly2nb(., queen=T)
+
+#or nearest neighbours
+knn_wards_B <-coordsW_B %>%
+  knearneigh(., k=4)
+
+LSOA_knn_B <- knn_wards_B %>%
+  knn2nb()
+
+#plot them
+plot(LSOA_nb_B, st_geometry(coordsW_B), col="red")
+```
+
+```{r}
+plot(LSOA_knn_B, st_geometry(coordsW_B), col="blue")
+```
+
+
+```{r}
+#create a spatial weights matrix from these weights
+Lward.lw <- LSOA_nb_B %>%
+  nb2mat(., style="B")
+
+sum(Lward.lw)
+```
+
+```{r}
+sum(Lward.lw[1,])
+```
+
+```{r}
+Lward.lw <- LSOA_nb_B %>%
+  nb2listw(., style="C")
+```
+
+```{r}
+I_LWard_Global_Density <- LSOA_B %>%
+  pull(Mean_price_B) %>%
+  as.vector()%>%
+  moran.test(., Lward.lw)
+
+I_LWard_Global_Density
+```
+#The Moran’s I statistic = 0.74 (remember 1 = clustered, 0 = no pattern, -1 = dispersed) which shows that we have some distinctive clustering
+
+```{r}
+I_LWard_Local_Density <- LSOA_B %>%
+  pull(Mean_price_B) %>%
+  as.vector()%>%
+  localmoran(., Lward.lw)%>%
+  as_tibble()
+
+#what does the output (the localMoran object) look like?
+slice_head(I_LWard_Local_Density, n=5)
+```
+
+
+```{r}
+points_sf_joined <- LSOA_B %>%
+  mutate(density_I =as.numeric(I_LWard_Local_Density$Ii))%>%
+  mutate(density_Iz =as.numeric(I_LWard_Local_Density$Z.Ii))
+```
+
+```{r}
+breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+```
+
+```{r}
+library(RColorBrewer)
+MoranColours<- rev(brewer.pal(8, "RdGy"))
+```
+
+```{r}
+tm_shape(points_sf_joined) +
+    tm_polygons("density_Iz",
+        style="fixed",
+        breaks=breaks1,
+        palette=MoranColours,
+        midpoint=NA,
+        title="Local Moran's I, Mean House Price in Birmingham")
+
+
+
+
+```
+```{r}
+GI <- 
+  LSOA_B %>%
+  pull(Mean_price_B) %>%
+  as.vector()%>%
+  globalG.test(., Lward.lw)
+
+GI
+```
+#The General G statistic = G > expected, so high values are tending to cluster.
+
+
+##调整ing
+
+
+
+```{r}
+#full model Birmingham
+modelB_full <- lm(Mean_price_B ~ population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_2+cars_3more
+            +edu_apprenticeship+edu_level_4more+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other++workstatus_student, 
+            data = LSOA_B)
+```
+
+
+```{r}
+library(car)
+vif(modelB_full)
+```
+#删除： workdistance_home，cars_2，edu_level_4more
+
+线性回归;
+```{r}
+#删除eud_level_4more
+modelB_1 <- lm(Mean_price_B ~ population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_2+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other+workstatus_student, 
+            data = LSOA_B)
+summary(modelB_1)
+```
+```{r}
+library(car)
+vif(modelB_1)
+```
+
+
+```{r}
+#删除cars_2
+modelB_1 <- lm(Mean_price_B ~  population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other++workstatus_student, 
+            data = LSOA_B)
+summary(modelB_1)
+```
+
+```{r}
+library(car)
+vif(modelB_1)
+```
+
+
+```{r}
+#删除p不显著的
+modelB_1 <- lm(Mean_price_B ~  population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+             + workdistance_10to30 + workdistance_30more 
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_level1+edu_no
+            +workstatus_retired+workstatus_student, 
+            data = LSOA_B)
+summary(modelB_1)
+```
+##调整结束
+
+
+
+
+
+
+```{r}
+#Linear Regression Model VIF处理后
+MLR_B <- lm(Mean_price_B ~  population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+             + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_ft+workstatus_pt+workstatus_retired+workstatus_other, data = LSOA_B)
+
+summary(MLR_B)
+```
+
+
+```{r}
+
+library(MASS)
+
+# 定义基础模型
+modelB_null <- lm(Mean_price_B ~ 1, data = LSOA_B)
+
+# 进行逐步回归，direction可以是"both"（默认），"backward"或"forward"
+model1_B <- step(modelB_null, scope = list(lower = modelB_null, upper = MLR_B), direction = "both")
+
+# 查看逐步回归的结果
+summary(model1_B)
+
+```
+
+```{r}
+summary(model1_B)
+```
+
+
+空间滞后模型：
+邻接矩阵：LSOA_knn_B
+
+```{r}
+# 这里是空间滞后模型
+library(spatialreg)
+model2_B <- lagsarlm(Mean_price_B ~ 
+                population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+             + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_ft+workstatus_pt+workstatus_retired+workstatus_other, data = LSOA_B,
+               nb2listw(LSOA_knn_B, style="C"), 
+               method = "eigen")
+
+tidy(model2_B)
+```
+
+
+
+```{r}
+glance(model2_B)
+```
+
+```{r}
+summary(model2_B)
+```
+
+```{r}
+AIC(model1_B, model2_B)
+BIC(model1_B, model2_B)
+```
+
+
+```{r}
+    # 转换坐标系到 LSOA_B_projected EPSG 27700
+    LSOA_B <- st_transform(LSOA_B, crs = 27700)
+```
+
+
+Kriging插值法：
+处理Mean price 2021 Birmingham  （1.5min）
+```{r}
+# 定义克里金模型时忽略空值
+kriging_model_B <- gstat(formula = population ~ 1, data = na.omit(LSOA_B), model = vgm(1, "Sph", 900, 1))
+
+# 进行插值
+kriging_result_B <- predict(kriging_model_B, newdata = LSOA_B)
+
+```
+插值过的mean price 2021的列名为var1.pred
+然后合到shapefile:LSOA_B里，叫：Mean_price_filled
+
+```{r}
+# 将 Kriging 结果添加为新的 Mean_price 列
+LSOA_B$population1 <- kriging_result_B$var1.pred
+
+# 查看结果以确认更改
+head(LSOA_B)
+```
+
+```{r}
+print(kriging_result_B)
+```
+
+插值后的mean price地图：
+```{r}
+# 设置tmap绘图模式
+tmap_mode("plot")
+
+# 创建自定义颜色区间和颜色
+breaks <- c(seq(0, 300000, by = 50000), Inf)
+colors <- c(RColorBrewer::brewer.pal(20, "Blues"), "darkblue")
+
+# 绘图
+tm_shape(LSOA_B) +
+  tm_polygons("Mean_price_B",
+              breaks = breaks,
+              palette = colors,
+              border.col = NULL,
+              title = "Mean House Prices of Birmingham in 2021") +
+  tm_layout(legend.outside = TRUE)
+```
+
+## Population variable join
+
+```{r}
+# 读取 CSV 文件
+population <- read_csv("Population_B.csv")
+```
+```{r}
+# 执行左连接
+LSOA_B <- left_join(LSOA_B, population, by = c("LSOA11CD" = "LSOA code"))
+
+```
+
+
+
+Kriging插值法：
+无空值，不需要插值处理population_B
+```{r}
+# 定义克里金模型时忽略空值
+kriging_model_P <- gstat(formula = population_B ~ 1, data = na.omit(LSOA_B), model = vgm(1, "Sph", 900, 1))
+
+# 进行插值
+kriging_result_P <- predict(kriging_model_P, newdata = LSOA_B)
+```
+
+插值过的population的列名为population.pred
+然后合到shapfile里，叫：population_filled
+
+
+
+
+插值后的population地图：
+```{r}
+# 设置tmap绘图模式
+tmap_mode("plot")
+
+# 创建自定义颜色区间和颜色
+breaks <- c(seq(0, 10000, by = 1000), Inf)
+colors <- c(RColorBrewer::brewer.pal(20, "Blues"), "darkblue")
+
+# 绘图
+tm_shape(LSOA_B) +
+  tm_polygons("population_B_filled",
+              breaks = breaks,
+              palette = colors,
+              border.col = NULL,
+              title = "Population Density of B") +
+  tm_layout(legend.outside = TRUE)
+```
+```{r}
+library(tmap)
+library(RColorBrewer)
+
+# 设置tmap模式为静态图
+tmap_mode("plot")
+
+# 创建自定义颜色区间和颜色
+breaks <- c(seq(0, 10000, by = 1000), Inf)
+colors <- c(RColorBrewer::brewer.pal(9, "Blues"), "darkblue")
+
+# 绘图
+map <- tm_shape(LSOA_B) +
+  tm_polygons("population_B_filled",
+              breaks = breaks,
+              palette = colors,
+              border.col = "gray",
+              title = "Population Density of B") +
+  tm_compass(type = "8star", position = c("left", "top"), size = 1.5) +
+  tm_scale_bar(breaks = c(0, 2, 4), position = c("right", "bottom")) +
+  tm_layout(main.title = "Population Density Map of B",
+            main.title.size = 1.5,
+            legend.outside = TRUE,
+            legend.position = c("left", "bottom"),
+            frame = FALSE,
+            outer.margins = 0)
+
+# 添加底图
+map + tm_basemap(server = "OpenStreetMap")
+
+# 打印地图
+print(map)
+
+```
+
+
+## Population variable join END
+
+
+## 另外一个变量转为数值变量
+
+```{r}
+# 读取 CSV 文件
+workdistance_B <- read_csv("WorkDistance_B.csv")
+```
+
+
+```{r}
+# 将数据从长格式转换为宽格式
+df_wide <- workdistance_B %>%
+  pivot_wider(names_from = DistanceCode, values_from = Observation, names_prefix = "DistanceCode_")
+
+# 查看前几行数据
+head(df_wide)
+```
+
+```{r}
+# 使用mutate函数来创建新的列
+df_wide <- df_wide %>%
+  mutate(
+    DistanceCode_1a = DistanceCode_1 + DistanceCode_2 + DistanceCode_3,
+    DistanceCode_2a = DistanceCode_4 + DistanceCode_5,
+    DistanceCode_3a = DistanceCode_6 + DistanceCode_7 + DistanceCode_8
+  )
+
+# 查看更新后的数据框
+print(df_wide)
+```
+
+
+
+
+```{r}
+df_wide <- subset(df_wide, select= c(-DistanceCode_1, -DistanceCode_2, -DistanceCode_3,
+    -DistanceCode_4, -DistanceCode_5, -DistanceCode_6, -DistanceCode_7, -DistanceCode_8
+  ))
+```
+
+
+```{r}
+# 使用rename函数来重命名列
+df_wide <- df_wide %>%
+  rename(
+    workdistance_1 = DistanceCode_1a,
+    workdistance_2 = DistanceCode_2a,
+    workdistance_3 = DistanceCode_3a,
+    workdistance_4 = DistanceCode_9,
+    workdistance_5 = DistanceCode_10,
+    workdistance_6 = "DistanceCode_-8"
+  )
+
+# 查看更新后的数据框
+print(df_wide)
+```
+
+
+```{r}
+# 执行左连接
+LSOA_B <- left_join(LSOA_B, df_wide, by = c("LSOA11CD" = "Lower layer Super Output Areas Code"))
+
+```
+
+## 另外一个变量END
+
+
+
+
+
+
+
+
+
+
+
+#correlation matrix
+
+```{r}
+library(corrplot) 
+```
+
+```{r}
+# 选择相关性测试的列
+columns_to_test <- c( "Mean_price_B", "population", "bedrooms_2", "bedrooms_3", "bedrooms_4more",
+                      "centralheating_no",
+                      "cars_2", "cars_3more","cars_no",  
+                      "workstatus_pt", "workstatus_retired", "workstatus_other","workstatus_student",
+                      "workdistance_10to30", "workdistance_30more", "workdistance_home", "workdistance_outside",
+                      "edu_level1", "edu_level2", "edu_level_4more",  "edu_no","edu_apprenticeship","edu_other")
+
+
+# 计算相关矩阵
+cor_matrix <- cor(Birmingham_census[columns_to_test], use="complete.obs")  # 排除任何NA值
+
+# 绘制相关性矩阵图
+png("corrplot.png", width = 950, height = 950)  # 增加输出图像的尺寸
+corrplot(cor_matrix, method="color", type="upper", order="original",
+         addCoef.col = "black", # 添加相关系数
+         tl.col="black", tl.srt=45)  # 调整标签颜色和角度
+
+
+
+```
+
+
+```{r}
+# 定义原始列名和新列名的映射
+columns_to_test <- c("Mean_price_B", "population", "bedrooms_2", "bedrooms_3", "bedrooms_4more",
+                     "centralheating_no", "cars_2", "cars_3more","cars_no",
+                     "workstatus_pt", "workstatus_retired", "workstatus_other","workstatus_student",
+                     "workdistance_10to30", "workdistance_30more", "workdistance_home", "workdistance_outside",
+                     "edu_level1", "edu_level2", "edu_level_4more", "edu_no","edu_apprenticeship","edu_other")
+
+# 确保所有列名都存在
+existing_columns <- intersect(columns_to_test, colnames(Birmingham_census))
+
+# 创建新的名称映射
+new_names <- c("Mean_price_B", LETTERS[1:length(existing_columns[-1])])
+names(new_names) <- c("Mean_price_B", existing_columns[-1])
+
+# 创建一个新的数据框，只包含我们想要的列，并重命名
+Birmingham_census_renamed <- Birmingham_census[existing_columns]
+colnames(Birmingham_census_renamed) <- new_names[existing_columns]
+
+# 计算相关矩阵
+cor_matrix <- cor(Birmingham_census_renamed, use="complete.obs")
+
+# 绘制相关性矩阵图
+png("corrplot_renamed.png", width = 950, height = 950)
+corrplot(cor_matrix, method="color", type="upper", order="original",
+         addCoef.col = "black",
+         tl.col="black", tl.srt=45)
+dev.off()
+```
+
+
+
+
+##调整
+
+```{r}
+# 删edu_4more
+library(spatialreg)
+model2_B <- lagsarlm(Mean_price_B ~ 
+                population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_2+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other+workstatus_student, data = LSOA_B,
+               nb2listw(LSOA_knn_B, style="C"), 
+               method = "eigen")
+
+vif(model2_B)
+```
+
+```{r}
+# 删cars2
+library(spatialreg)
+model2_B <- lagsarlm(Mean_price_B ~ 
+                population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other+workstatus_student, data = LSOA_B,
+               nb2listw(LSOA_knn_B, style="C"), 
+               method = "eigen")
+
+vif(model2_B)
+```
+
+```{r}
+# 删p不显著1
+library(spatialreg)
+model2_B <- lagsarlm(Mean_price_B ~ 
+                population 
+            + bedrooms_4more  + bedrooms_3 
+             + workdistance_10to30 + workdistance_30more 
+            
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_student, data = LSOA_B,
+               nb2listw(LSOA_knn_B, style="C"), 
+               method = "eigen")
+
+summary(model2_B)
+```
+```{r}
+# 删p不显著2
+library(spatialreg)
+model2_B <- lagsarlm(Mean_price_B ~ 
+                population 
+            + bedrooms_4more  + bedrooms_3 
+             + workdistance_10to30 + workdistance_30more 
+            
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_level1+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_student, data = LSOA_B,
+               nb2listw(LSOA_knn_B, style="C"), 
+               method = "eigen")
+
+summary(model2_B)
+```
+```{r}
+tidy(model2_B)
+```
+
+```{r}
+glance(model2_B)
+```
+
+##调整成功
+
+
+```{r}
+AIC(modelB_1, model2_B)
+BIC(modelB_1,model2_B)
+```
+
+```{r}
+par(mfrow=c(2,2))    #plot to 2 by 2 array
+plot(modelB_1)
+```
+
+```{r}
+qtm(LSOA_B, fill = "Mean_price_B")
+```
+
+
+```{r}
+# 假设LSOA_B是您的空间数据对象
+qtm(LSOA_B, fill = "Mean_price_B") +
+  
+  tm_compass(
+    type = "8star",
+    position = c("right", "bottom"),
+    size = 2
+  ) +
+  tm_scale_bar(
+    position = c("right", "bottom"),
+    width = 0.15
+  )
+```
+```{r}
+tm_shape(LSOA_B) +
+  tm_fill("Mean_price_B", 
+          breaks = c(0, 100000, 200000, 300000, 400000, 500000),
+          palette = c("#FFFFD4", "#FED98E", "#FE9929", "#D95F0E", "#993404"),
+          title = "Mean_price_B") +
+  tm_borders(col = "gray", lwd = 0.1) +
+  tm_layout(
+    main.title = "Mean Price B",
+    frame = TRUE,
+    legend.outside = TRUE,
+    legend.outside.position = "right"
+  ) +
+  tm_compass(
+    type = "8star",
+    position = c("right", "bottom"),
+    size = 1
+  ) +
+  tm_scale_bar(
+    position = c("right", "bottom"),
+    width = 0.15
+  )
+```
+
+```{r}
+library(ggplot2)
+
+# 假设您的数据框名为 df，并且包含 Mean_price_B 列
+ggplot(LSOA_B, aes(x = Mean_price_B)) +
+  geom_histogram(aes(y = ..count..), binwidth = 10000, fill = "grey", color = "black") +
+  labs(title = "Distribution of Mean House Prices in Birmingham",
+       x = "Mean Price (£)",
+       y = "Count") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::comma) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+summary(LSOA_B$population)
+```
+
+
+```{r}
+# 创建数据框
+data <- data.frame(
+  category = c("1 Car", "2 Cars", "3+ Cars", "No Car"),
+  value = c(413419, 86298, 26681, 134104)
+)
+
+# 计算百分比
+data$percentage <- data$value / sum(data$value) * 100
+
+# 创建百分比堆积柱状图
+ggplot(data, aes(x = "", y = percentage, fill = category)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_stack(vjust = 0.5)) +
+  coord_flip() +  # 将图表横向显示
+  labs(title = "Distribution of Car Ownership in Birmingham",
+       x = NULL,
+       y = "Percentage",
+       fill = "Car Ownership Category") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.y = element_blank(),  # 移除y轴标签
+        axis.ticks.y = element_blank()) +  # 移除y轴刻度
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1))
+
+```
+
+```{r}
+# 加载必要的包
+library(ggplot2)
+library(scales)
+
+# 创建数据框
+data <- data.frame(
+  category = c("1 Car", "2 Cars", "3+ Cars", "No Car"),
+  value = c(413419, 86298, 26681, 134104)
+)
+
+# 计算百分比
+data$percentage <- data$value / sum(data$value) * 100
+
+# 添加总数
+total <- sum(data$value)
+
+# 创建百分比堆积柱状图
+ggplot(data, aes(x = "", y = percentage, fill = factor(category, levels = rev(category)))) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = sprintf("%.1f%%\n%s", percentage, comma(value))), 
+            position = position_stack(vjust = 0.5), size = 3.5) +
+  coord_flip() +  # 将图表横向显示
+  labs(title = "Distribution of Car Ownership in Birmingham",
+       
+       x = NULL,
+       y = "Percentage",
+       fill = "Car Ownership Category") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.text.y = element_blank(),  # 移除y轴标签
+        axis.ticks.y = element_blank()) +  # 移除y轴刻度
+  scale_fill_brewer(palette = "Set2", direction = -1) +
+  scale_y_continuous(labels = percent_format(scale = 1))
+
+```
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+
+# Create data frame
+birmingham_housing <- data.frame(
+  bedrooms = c("1 bedroom", "2 bedrooms", "3 bedrooms", "4 or more bedrooms"),
+  count = c(59465, 102768, 190612, 70568)
+)
+
+# Calculate percentages
+birmingham_housing <- birmingham_housing %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# 1. Bar plot
+ggplot(birmingham_housing, aes(x = bedrooms, y = count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Distribution of Bedrooms Number in Birmingham",
+       x = "Number of Bedrooms",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 2. Pie chart
+ggplot(birmingham_housing, aes(x = "", y = count, fill = bedrooms)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  labs(title = "Distribution of Bedrooms Number in Birmingham",
+       fill = "Number of Bedrooms") +
+  theme_void() +
+  theme(legend.position = "bottom")
+
+# 3. Treemap
+library(treemapify)
+ggplot(birmingham_housing, aes(area = count, fill = bedrooms, label = paste(bedrooms, "\n", round(percentage, 1), "%"))) +
+  geom_treemap() +
+  geom_treemap_text(colour = "white", place = "centre", size = 15) +
+  labs(title = "Distribution of Bedrooms Number in Birmingham") +
+  theme(legend.position = "none")
+
+# 4. Lollipop chart
+ggplot(birmingham_housing, aes(x = bedrooms, y = count)) +
+  geom_segment(aes(x = bedrooms, xend = bedrooms, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  labs(title = "Distribution of Bedrooms Number in Birmingham",
+       x = "Number of Bedrooms",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+
+# Create data frame
+work_status <- data.frame(
+  status = c("Full-time", "Part-time", "Retired", "Other", "Student"),
+  count = c(15603, 3678, 138513, 45738, 89185)
+)
+
+# Calculate percentages
+work_status <- work_status %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# 1. Bar plot
+ggplot(work_status, aes(x = reorder(status, -count), y = count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Work Status Distribution",
+       x = "Work Status",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 2. Pie chart
+ggplot(work_status, aes(x = "", y = count, fill = status)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  labs(title = "Work Status Distribution",
+       fill = "Work Status") +
+  theme_void() +
+  theme(legend.position = "right")
+
+# 3. Treemap
+library(treemapify)
+ggplot(work_status, aes(area = count, fill = status, label = paste(status, "\n", round(percentage, 1), "%"))) +
+  geom_treemap() +
+  geom_treemap_text(colour = "white", place = "centre", size = 15) +
+  labs(title = "Work Status Distribution") +
+  theme(legend.position = "none")
+
+# 4. Lollipop chart
+ggplot(work_status, aes(x = reorder(status, -count), y = count)) +
+  geom_segment(aes(x = status, xend = status, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  labs(title = "Work Status Distribution",
+       x = "Work Status",
+       y = "Count") +
+  theme_minimal() +
+  coord_flip()
+
+# 5. Waffle chart
+library(waffle)
+waffle_data <- work_status$count / 1000
+names(waffle_data) <- work_status$status
+
+waffle(waffle_data, rows = 10, size = 0.5, 
+       colors = c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"),
+       title = "Work Status Distribution (1 square = 1,000 people)")
+```
+
+
+
+```{r}
+# 安装并加载必要的包
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+library(ggplot2)
+
+# 创建数据框
+data <- data.frame(
+  bedrooms = c("1 bedroom", "2 bedrooms", "3 bedrooms", "4+ bedrooms"),
+  value = c(59465, 102768, 190612, 70568)
+)
+
+# 计算总和和百分比
+total <- sum(data$value)
+data$percentage <- data$value / total * 100
+
+# 创建堆叠柱状图
+ggplot(data, aes(x = "", y = value, fill = factor(bedrooms, levels = rev(bedrooms)))) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = sprintf("%d\n(%.1f%%)", value, percentage)), 
+            position = position_stack(vjust = 0.5), 
+            size = 4) +
+  coord_flip() +  # 将图表横向显示
+  labs(title = "Distribution of Bedroom Numbers in Birmingham",
+       subtitle = sprintf("Total: %d households", total),
+       x = NULL,
+       y = "Number of Households",
+       fill = "Number of Bedrooms") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.text.y = element_blank(),  # 移除y轴标签
+        axis.ticks.y = element_blank()) +  # 移除y轴刻度
+  scale_fill_brewer(palette = "Set3", direction = -1) +
+  scale_y_continuous(labels = scales::comma)  # 使用逗号分隔数字
+
+
+```
+
+```{r}
+# 安装并加载必要的包
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+library(ggplot2)
+
+# 创建数据框
+data <- data.frame(
+  centralheating = c("Has Central Heating", "No Central Heating"),
+  value = c(423397, 9978)
+)
+
+# 计算总和和百分比
+total <- sum(data$value)
+data$percentage <- data$value / total * 100
+
+# 创建堆叠柱状图
+ggplot(data, aes(x = "", y = value, fill = factor(centralheating, levels = rev(centralheating)))) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = sprintf("%d\n(%.1f%%)", value, percentage)), 
+            position = position_stack(vjust = 0.5), 
+            size = 4) +
+  coord_flip() +  # 将图表横向显示
+  labs(title = "Distribution of Central Heating in Birmingham",
+
+       x = NULL,
+       y = "Number of Households",
+       fill = "Central Heating Status") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.text.y = element_blank(),  # 移除y轴标签
+        axis.ticks.y = element_blank()) +  # 移除y轴刻度
+  scale_fill_manual(values = c("#66c2a5", "#fc8d62")) +  # 自定义颜色
+  scale_y_continuous(labels = scales::comma)  # 使用逗号分隔数字
+
+
+```
+
+
+```{r}
+# Create data frame
+work_status <- data.frame(
+  status = c("Full-time", "Part-time", "Retired", "Other", "Student"),
+  count = c(15603, 3678, 138513, 45738, 89185)
+)
+
+# Calculate percentages
+work_status <- work_status %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# 4. Lollipop chart
+ggplot(work_status, aes(x = reorder(status, -count), y = count)) +
+  geom_segment(aes(x = status, xend = status, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  labs(title = "Distribution of Work Status in Birmingham ",
+       x = "Work Status",
+       y = "Count") +
+  theme_minimal() +
+  coord_flip()
+
+# 3. Treemap
+library(treemapify)
+ggplot(work_status, aes(area = count, fill = status, label = paste(status, "\n", round(percentage, 1), "%"))) +
+  geom_treemap() +
+  geom_treemap_text(colour = "white", place = "centre", size = 15) +
+  labs(title = "Distribution of Work Status in Birmingham ") +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+
+# Create data frame
+birmingham_education <- data.frame(
+  edu_level = c("Level 1", "Level 2", "Level 3", "Level 4+", "No qualifications", "Apprenticeship", "Other"),
+  count = c(90079, 111204, 152046, 265807, 212203, 32435, 25857)
+)
+
+# Calculate percentages
+birmingham_education <- birmingham_education %>%
+  mutate(percentage = count / sum(count) * 100,
+         edu_level = fct_reorder(edu_level, count))
+
+# 1. Bar plot
+ggplot(birmingham_education, aes(x = edu_level, y = count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Birmingham Education Level Distribution",
+       x = "Education Level",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 2. Pie chart
+ggplot(birmingham_education, aes(x = "", y = count, fill = edu_level)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  labs(title = "Birmingham Education Level Distribution",
+       fill = "Education Level") +
+  theme_void() +
+  theme(legend.position = "right")
+
+# 3. Treemap
+library(treemapify)
+ggplot(birmingham_education, aes(area = count, fill = edu_level, label = paste(edu_level, "\n", round(percentage, 1), "%"))) +
+  geom_treemap() +
+  geom_treemap_text(colour = "white", place = "centre", size = 10) +
+  labs(title = "Birmingham Education Level Distribution") +
+  theme(legend.position = "none")
+
+# 4. Doughnut chart
+ggplot(birmingham_education, aes(x = 2, y = count, fill = edu_level)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  theme(legend.position = "right") +
+  xlim(0.5, 2.5) +
+  labs(title = "Birmingham Education Level Distribution",
+       fill = "Education Level")
+
+# 5. Lollipop chart
+ggplot(birmingham_education, aes(x = edu_level, y = count)) +
+  geom_segment(aes(x = edu_level, xend = edu_level, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  labs(title = "Birmingham Education Level Distribution",
+       x = "Education Level",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+
+# Create data frame
+birmingham_work_distance <- data.frame(
+  distance = c("10 to 30 km", "30 km or more", "Work from home", "Work outside", "Less than 10 km"),
+  count = c(194867, 54768, 114069, 63138, 1144955)
+)
+
+# Calculate percentages
+birmingham_work_distance <- birmingham_work_distance %>%
+  mutate(percentage = count / sum(count) * 100,
+         distance = fct_reorder(distance, count))
+
+# 1. Bar plot
+ggplot(birmingham_work_distance, aes(x = distance, y = count)) +
+  geom_bar(stat = "identity", fill = "lightgreen") +
+  labs(title = "Birmingham Work Distance Distribution",
+       x = "Work Distance",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 2. Pie chart
+ggplot(birmingham_work_distance, aes(x = "", y = count, fill = distance)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  labs(title = "Birmingham Work Distance Distribution",
+       fill = "Work Distance") +
+  theme_void() +
+  theme(legend.position = "right")
+
+# 3. Treemap
+library(treemapify)
+ggplot(birmingham_work_distance, aes(area = count, fill = distance, label = paste(distance, "\n", round(percentage, 1), "%"))) +
+  geom_treemap() +
+  geom_treemap_text(colour = "white", place = "centre", size = 10) +
+  labs(title = "Distribution of Work Distance in Birmingham") +
+  theme(legend.position = "none")
+
+# 4. Doughnut chart
+ggplot(birmingham_work_distance, aes(x = 2, y = count, fill = distance)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  theme(legend.position = "right") +
+  xlim(0.5, 2.5) +
+  labs(title = "Birmingham Work Distance Distribution",
+       fill = "Work Distance")
+
+# 5. Lollipop chart
+ggplot(birmingham_work_distance, aes(x = distance, y = count)) +
+  geom_segment(aes(x = distance, xend = distance, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  labs(title = "Distribution of Work Distance in Birmingham",
+       x = "Work Distance",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(scales)  # For comma formatting of large numbers
+
+# Create data frame
+birmingham_work_distance <- data.frame(
+  distance = c("10 to 30 km", "30 km or more", "Work from home", "Work outside", "Less than 10 km"),
+  count = c(194867, 54768, 114069, 63138, 1144955)
+)
+
+# Calculate percentages and order by count
+birmingham_work_distance <- birmingham_work_distance %>%
+  mutate(percentage = count / sum(count) * 100,
+         distance = fct_reorder(distance, count))
+
+# 5. Lollipop chart with count labels
+ggplot(birmingham_work_distance, aes(x = distance, y = count)) +
+  geom_segment(aes(x = distance, xend = distance, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  geom_text(aes(label = comma(count)), vjust = -0.5, size = 3.5) +  # Add count labels
+  labs(title = "Distribution of Work Distance in Birmingham",
+       x = "Work Distance",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) +  # Use comma formatting for y-axis labels
+  coord_flip()  # Flip coordinates for better readability of labels
+```
+
+
+
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+
+# Create data frame
+birmingham_education <- data.frame(
+  edu_level = c("Level 1", "Level 2", "Level 3", "Level 4+", "No qualifications", "Apprenticeship", "Other"),
+  count = c(90079, 111204, 152046, 265807, 212203, 32435, 25857)
+)
+
+# Calculate percentages
+birmingham_education <- birmingham_education %>%
+  mutate(percentage = count / sum(count) * 100,
+         edu_level = fct_reorder(edu_level, count))
+
+# 1. Bar plot
+ggplot(birmingham_education, aes(x = edu_level, y = percentage)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), vjust = -0.5) +
+  labs(title = "Birmingham Education Level Distribution",
+       x = "Education Level",
+       y = "Percentage") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 2. Pie chart
+ggplot(birmingham_education, aes(x = "", y = percentage, fill = edu_level)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), position = position_stack(vjust = 0.5)) +
+  labs(title = "Birmingham Education Level Distribution",
+       fill = "Education Level") +
+  theme_void() +
+  theme(legend.position = "right")
+
+# 3. Treemap
+library(treemapify)
+ggplot(birmingham_education, aes(area = count, fill = edu_level, label = paste(edu_level, "\n", sprintf("%.1f%%", percentage)))) +
+  geom_treemap() +
+  geom_treemap_text(colour = "white", place = "centre", size = 10) +
+  labs(title = "Birmingham Education Level Distribution") +
+  theme(legend.position = "none")
+
+# 4. Doughnut chart
+ggplot(birmingham_education, aes(x = 2, y = percentage, fill = edu_level)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), position = position_stack(vjust = 0.5)) +
+  theme_void() +
+  theme(legend.position = "right") +
+  xlim(0.5, 2.5) +
+  labs(title = "Birmingham Education Level Distribution",
+       fill = "Education Level")
+
+# 5. Horizontal bar chart
+ggplot(birmingham_education, aes(x = percentage, y = edu_level)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), hjust = -0.1) +
+  labs(title = "Birmingham Education Level Distribution",
+       x = "Percentage",
+       y = "Education Level") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(0, max(birmingham_education$percentage) * 1.1))
+
+```
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(scales)  # For comma formatting of large numbers
+
+# Create data frame
+birmingham_education <- data.frame(
+  edu_level = c("Level 1", "Level 2", "Level 3", "Level 4+", "No qualifications", "Apprenticeship", "Other"),
+  count = c(90079, 111204, 152046, 265807, 212203, 32435, 25857)
+)
+
+# Order education levels by count
+birmingham_education <- birmingham_education %>%
+  mutate(edu_level = fct_reorder(edu_level, count))
+
+# Lollipop chart
+ggplot(birmingham_education, aes(x = edu_level, y = count)) +
+  geom_segment(aes(x = edu_level, xend = edu_level, y = 0, yend = count), 
+               color = "skyblue", size = 1) +
+  geom_point(color = "darkblue", size = 4) +
+  geom_text(aes(label = comma(count)), vjust = -0.5) +  # Use comma() for thousand separators
+  labs(title = "Distribution of Education Level in Birmingham ",
+       x = "Education Level",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) +  # Use comma formatting for y-axis labels
+  coord_flip()
+```
+```{r}
+
+# Create data frame
+birmingham_work_status <- data.frame(
+  status = c("Full-time", "Part-time", "Retired", "Other", "Student"),
+  count = c(15603, 3678, 138513, 45738, 89185)
+)
+
+# Order work status by count
+birmingham_work_status <- birmingham_work_status %>%
+  mutate(status = fct_reorder(status, count))
+
+# Lollipop chart with count labels
+ggplot(birmingham_work_status, aes(x = status, y = count)) +
+  geom_segment(aes(x = status, xend = status, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  geom_text(aes(label = comma(count)), vjust = -0.5, size = 3.5) +  # Add count labels
+  labs(title = "Distribution of Work Status in Birmingham",
+       x = "Work Status",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) +  # Use comma formatting for y-axis labels
+  coord_flip()  # Flip coordinates for better readability of labels
+```
+
+
+
+```{r}
+library(ggspatial)
+ggplot() +
+  geom_sf(data = LSOA_B, aes(fill = population), color = NA) +
+  scale_fill_viridis(option = "plasma", name = "Population") +
+  theme_minimal() +
+  labs(title = "Population Distribution in Birmingham",
+       subtitle = "Based on LSOA boundaries") +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank()) +
+  annotation_scale(location = "br", width_hint = 0.3) +
+  annotation_north_arrow(location = "br", which_north = "true",
+                         pad_x = unit(0.2, "in"), pad_y = unit(0.2, "in"),
+                         style = north_arrow_fancy_orienteering)
+```
+
+```{r}
+# 安装并加载必要的包
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+library(ggplot2)
+
+# 创建数据框
+data <- data.frame(
+  cars = c("No car", "1 car", "2 cars", "3 or more cars"),
+  value = c(134104, 413419, 86298, 26681)
+)
+
+# 计算总和和百分比
+total <- sum(data$value)
+data$percentage <- data$value / total * 100
+
+# 创建堆叠柱状图
+ggplot(data, aes(x = "", y = value, fill = factor(cars, levels = rev(cars)))) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = sprintf("%d\n(%.1f%%)", value, percentage)), 
+            position = position_stack(vjust = 0.5), 
+            size = 4) +
+  coord_flip() +  # 将图表横向显示
+  labs(title = "Distribution of Car Ownership in Birmingham",
+       
+       x = NULL,
+       y = "Number of Households",
+       fill = "Number of Cars") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.text.y = element_blank(),  # 移除y轴标签
+        axis.ticks.y = element_blank()) +  # 移除y轴刻度
+  scale_fill_brewer(palette = "Set3", direction = -1) +
+  scale_y_continuous(labels = scales::comma)  # 使用逗号分隔数字
+```
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(scales)  # For comma formatting of large numbers
+
+# Create data frame for Birmingham
+birmingham_education <- data.frame(
+  edu_level = c("Level 1", "Level 2", "Level 3", "Level 4+", "No qualifications", "Apprenticeship", "Other"),
+  count = c(90079, 111204, 152046, 265807, 212203, 32435, 25857)
+)
+
+# Calculate total population and percentages
+total_population <- sum(birmingham_education$count)
+birmingham_education <- birmingham_education %>%
+  mutate(percentage = count / total_population * 100)
+
+# Order education levels by count
+birmingham_education <- birmingham_education %>%
+  mutate(edu_level = fct_reorder(edu_level, count))
+
+# Lollipop chart
+ggplot(birmingham_education, aes(x = edu_level, y = count)) +
+  geom_segment(aes(x = edu_level, xend = edu_level, y = 0, yend = count), 
+               color = "skyblue", size = 1) +
+  geom_point(color = "darkblue", size = 4) +
+  geom_text(aes(label = paste0(comma(count), "\n(", round(percentage, 1), "%)")), 
+            vjust = -0.5, size = 2) +  # Add count and percentage labels
+  labs(title = "Distribution of Education Level in Birmingham",
+       x = "Education Level",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) +  # Use comma formatting for y-axis labels
+  coord_flip()
+
+```
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(scales)  # For comma formatting of large numbers
+
+# Create data frame for Birmingham
+birmingham_work_status <- data.frame(
+  status = c("Full-time", "Part-time", "Retired", "Other", "Student"),
+  count = c(15603, 3678, 138513, 45738, 89185)
+)
+
+# Calculate total population
+total_population <- sum(birmingham_work_status$count)
+
+# Add percentage column
+birmingham_work_status <- birmingham_work_status %>%
+  mutate(percentage = count / total_population * 100)
+
+# Order work status by count
+birmingham_work_status <- birmingham_work_status %>%
+  mutate(status = fct_reorder(status, count))
+
+# Lollipop chart with count and percentage labels
+ggplot(birmingham_work_status, aes(x = status, y = count)) +
+  geom_segment(aes(x = status, xend = status, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  geom_text(aes(label = paste0(comma(count), "\n(", round(percentage, 1), "%)")), 
+            vjust = -0.5, size = 2.5) +  # Add count and percentage labels
+  labs(title = "Distribution of Work Status in Birmingham",
+       x = "Work Status",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) +  # Use comma formatting for y-axis labels
+  coord_flip()  # Flip coordinates for better readability of labels
+
+```
+
+
+```{r}
+summary(LSOA_B_updated$Mean_price_filled)
+```
+
+
