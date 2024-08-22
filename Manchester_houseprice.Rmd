@@ -1,0 +1,1060 @@
+
+```{r}
+#library a bunch of packages we may (or may not) use - install them first if not installed already. 
+library(tidyverse)
+library(tmap)
+library(geojsonio)
+library(plotly)
+library(broom)
+library(mapview)
+library(sf)
+library(sp)
+library(spdep)
+library(car)
+library(fs)
+library(janitor)
+library(gstat)
+library(raster)
+library(MASS)
+```
+
+
+```{r}
+#read in some attribute data
+LSOA_M <- st_read(here::here("Manchester.shp"))
+
+```
+
+```{r}
+LSOA_M<- rename(LSOA_M, Mean_price = Mean.pri15)
+```
+
+
+```{r}
+LSOA_M<- subset(LSOA_M, select= -c(Mean.pri_1, Mean.pri_2, Mean.pri_3, Mean.pri_4, Mean.pri_5, Mean.pri_6, Mean.pri_7,
+            Mean.pri_8, Mean.pri_9, Mean.pri10, Mean.pri11, Mean.pri12, Mean.pri13, Mean.pri14))
+```
+
+```{r}
+LSOA_M<- subset(LSOA_M, select= -c(Column2,OutputAr_1,Column2_2,Mean.price))
+```
+
+
+#Kriging：Mean price 2021 Manchester  （1.5min）
+```{r}
+
+kriging_model_M <- gstat(formula = Mean ~ 1, data = na.omit(LSOA_M), model = vgm(1, "Sph", 900, 1))
+
+
+kriging_result_M <- predict(kriging_model_M, newdata = LSOA_M)
+
+```
+#The interpolated mean price 2021 has the column name var1.pred and then merged into shapefile:LSOA_B called: mean_price_filled_M
+
+```{r}
+
+LSOA_M$Mean_price_M <- kriging_result_M$var1.pred
+
+head(LSOA_M)
+```
+
+```{r}
+print(kriging_result_M)
+
+```
+
+
+## Census variable join
+
+```{r}
+
+ Manchester_census <- read_csv("manchester_census_new.csv")
+```
+
+```{r}
+
+ Manchester_census <- read_csv("manchester_census_new.csv")
+```
+
+```{r}
+
+Manchester_edu <- read_csv("manchest_edu.csv")
+```
+
+
+```{r}
+
+LSOA_M <- left_join(LSOA_M, , by = c("OutputArea" = "OutputArea"))
+
+```
+
+```{r}
+
+LSOA_M <- left_join(LSOA_M, Manchester_census, by = c("OutputArea" = "OutputArea"))
+
+```
+
+# house prices join
+```{r}
+
+house_price <- read_csv("Mean price_EDITED.csv")
+```
+
+
+```{r}
+
+LSOA_M <- left_join(LSOA_M, house_price, by = c("OutputArea" = "LSOA code"))
+
+```
+
+```{r}
+
+modelM_full <- lm(Mean_price_M ~ population + bedrooms_4more + bedrooms_2 + bedrooms_3 +
+            workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no+cars_no+cars_2+cars_3more
+            +edu_apprenticeship+edu_level_4more+edu_other+edu_level_1to3
+            +workstatus_ft+workstatus_pt+workstatus_retired+workstatus_other, 
+            data = LSOA_M)
+summary(modelM_full)
+```
+
+```{r}
+
+modelM_full <- lm(Mean_price_M ~ population + bedrooms_4more + bedrooms_2 + bedrooms_3 +
+            workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no+cars_no+cars_2+cars_3more
+            +edu_apprenticeship+edu_level_4more+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_ft+workstatus_pt+workstatus_retired+workstatus_other, 
+            data = LSOA_M)
+summary(modelM_full)
+```
+
+#VIF
+```{r}
+library(car)
+vif(modelM_full)
+
+
+```
+#删除：bedrooms_4more，workdistance_home，cars_2，edu_level_4more 
+
+
+
+```{r}
+
+#VIF处理后2
+MLR_M <- lm(Mean_price_M ~ population+ bedrooms_2 + bedrooms_3 +
+             workdistance_10to30 + workdistance_30more + workdistance_outside
+             +centralheating_no
+            +cars_3more+cars_no
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_ft+workstatus_pt+workstatus_retired+workstatus_other, 
+            data = LSOA_M)
+
+# 查看模型的摘要
+summary(MLR_M)
+
+```
+
+
+
+
+#线性回归
+```{r}
+
+#VIF处理后
+MLR_M <- lm(Mean_price_M ~ population+ bedrooms_2 + bedrooms_3 + bedrooms_4more+
+             workdistance_10to30 + workdistance_30more + workdistance_outside
+             +centralheating_no
+            +cars_3more+cars_no
+            +edu_apprenticeship+edu_other+edu_level_1to3
+            +workstatus_ft+workstatus_pt+workstatus_retired+workstatus_other, 
+            data = LSOA_M)
+
+# 查看模型的摘要
+summary(MLR_M)
+
+```
+
+```{r}
+# 安装和加载必要的包（如果尚未安装）
+# install.packages("MASS") # 取消注释来安装MASS包，如果未安装
+
+library(MASS)
+
+# 假设data是你的数据框
+# 定义全模型
+
+
+# 定义基础模型
+modelM_null <- lm(Mean_price_M ~ 1, data = LSOA_M)
+
+# 进行逐步回归，direction可以是"both"（默认），"backward"或"forward"
+model1_M <- step(modelM_null, scope = list(lower = modelM_null, upper = MLR_M), direction = "both")
+
+# 查看逐步回归的结果
+summary(model1_M)
+
+```
+
+
+空间滞后模型：
+邻接矩阵：LSOA_knn_B
+8 min
+
+
+```{r}
+#calculate the centroids of all Wards in London
+coordsW_M <- LSOA_M%>%
+  st_centroid()%>%
+  st_geometry()
+
+plot(coordsW_M)
+```
+
+Adjacency Matrix
+```{r}
+LSOA_nb_M <- LSOA_M %>%
+  poly2nb(., queen=T)
+
+#or nearest neighbours
+knn_wards_M <-coordsW_M %>%
+  knearneigh(., k=4)
+
+LSOA_knn_M <- knn_wards_M %>%
+  knn2nb()
+
+#plot them
+plot(LSOA_nb_M, st_geometry(coordsW_M), col="red")
+```
+
+```{r}
+plot(LSOA_knn_M, st_geometry(coordsW_M), col="blue")
+```
+```{r}
+#create a spatial weights matrix from these weights
+Lward.lw <- LSOA_nb_M %>%
+  nb2mat(., style="B")
+
+sum(Lward.lw)
+```
+```{r}
+sum(Lward.lw[1,])
+```
+```{r}
+Lward.lw <- LSOA_nb_M %>%
+  nb2listw(., style="C")
+```
+
+```{r}
+I_LWard_Global_Density <- LSOA_M %>%
+  pull(Mean_price_M) %>%
+  as.vector()%>%
+  moran.test(., Lward.lw)
+
+I_LWard_Global_Density
+```
+#The Moran’s I statistic = 0.77 (remember 1 = clustered, 0 = no pattern, -1 = dispersed) which shows that we have some distinctive clustering
+
+```{r}
+I_LWard_Local_Density <- LSOA_M %>%
+  pull(Mean_price_M) %>%
+  as.vector()%>%
+  localmoran(., Lward.lw)%>%
+  as_tibble()
+
+#what does the output (the localMoran object) look like?
+slice_head(I_LWard_Local_Density, n=5)
+```
+```{r}
+points_sf_joined <- LSOA_M %>%
+  mutate(density_I =as.numeric(I_LWard_Local_Density$Ii))%>%
+  mutate(density_Iz =as.numeric(I_LWard_Local_Density$Z.Ii))
+```
+
+```{r}
+breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+```
+
+```{r}
+library(RColorBrewer)
+MoranColours<- rev(brewer.pal(8, "RdGy"))
+```
+
+```{r}
+tm_shape(points_sf_joined) +
+    tm_polygons("density_Iz",
+        style="fixed",
+        breaks=breaks1,
+        palette=MoranColours,
+        midpoint=NA,
+        title="Local Moran's I, Mean House Price in Manchester")
+```
+
+```{r}
+GI_M <- 
+  LSOA_M %>%
+  pull(Mean_price_M) %>%
+  as.vector()%>%
+  globalG.test(., Lward.lw)
+
+GI_M
+```
+#The General G statistic = G > expected, so high values are tending to cluster.
+
+
+```{r}
+# 这里是空间滞后模型22  1min
+library(spatialreg)
+model2_M <- lagsarlm(Mean_price_M ~population+ bedrooms_2 + bedrooms_3 +
+             workdistance_10to30 + workdistance_30more + workdistance_outside
+             +centralheating_no
+            +cars_3more+cars_no
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_ft+workstatus_pt+workstatus_retired+workstatus_other, data = LSOA_M,
+               nb2listw(LSOA_knn_M, style="C"), 
+               method = "eigen")
+
+
+
+tidy(model2_M)
+```
+
+
+```{r}
+# 这里是空间滞后模型  1min
+library(spatialreg)
+model2_M <- lagsarlm(Mean_price_M ~population+ bedrooms_2 + bedrooms_3 + bedrooms_4more+
+             workdistance_10to30 + workdistance_30more + workdistance_outside
+             +centralheating_no
+            +cars_3more+cars_no
+            +edu_apprenticeship+edu_other+edu_level_1to3
+            +workstatus_ft+workstatus_pt+workstatus_retired+workstatus_other, data = LSOA_M,
+               nb2listw(LSOA_knn_M, style="C"), 
+               method = "eigen")
+
+
+
+tidy(model2_M)
+```
+
+```{r}
+# 这里是空间滞后模型2  1min
+library(spatialreg)
+model2_M <- lagsarlm(Mean_price_M ~population+ bedrooms_2 + bedrooms_3 +
+             workdistance_10to30 + workdistance_30more + workdistance_outside
+             +centralheating_no
+            +cars_3more+cars_no+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_ft+workstatus_pt+workstatus_retired+workstatus_other, data = LSOA_M,
+               nb2listw(LSOA_knn_M, style="C"), 
+               method = "eigen")
+
+
+
+tidy(model2_M)
+```
+
+
+
+```{r}
+glance(model2_M)
+```
+
+```{r}
+summary(model2_M)
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+AIC(model1_M, model2_M)
+BIC(model1_M,model2_M)
+```
+
+```{r}
+# 设置tmap绘图模式
+tmap_mode("plot")
+
+# 创建自定义颜色区间和颜色
+breaks <- c(seq(0, 300000, by = 30000), Inf)
+colors <- c(RColorBrewer::brewer.pal(20, "Blues"), "darkblue")
+
+# 绘图
+tm_shape(LSOA_M) +
+  tm_polygons("Mean_price_M",
+              breaks = breaks,
+              palette = colors,
+              border.col = NULL,
+              title = "Mean Price of Manchester in 2021") +
+  tm_layout(legend.outside = TRUE)
+```
+
+
+```{r}
+# 确保数据已加载
+# LSOA_M 和 Manchester_census 应已正确加载到你的R环境
+
+# 使用merge函数按OutputArea合并数据
+Manchester_census <- merge(Manchester_census, LSOA_M[, c("OutputArea", "Mean_price_M")], 
+                            by = "OutputArea", 
+                            all.x = TRUE)  # 保留Manchester_census中的所有行，即使没有匹配的OutputArea
+
+# 检查结果
+head(Manchester_census)
+
+```
+
+##correlation matrix
+
+```{r}
+library(corrplot) 
+# 选择相关性测试的列
+columns_to_test1 <- c("Mean_price_M", "population", "bedrooms_2", "bedrooms_3", "bedrooms_4more",
+                      "centralheating_no",
+                      "cars_2", "cars_3more","cars_no",  
+                      "workstatus_pt", "workstatus_retired", "workstatus_other","workstatus_student",
+                      "workdistance_10to30", "workdistance_30more", "workdistance_home", "workdistance_outside",
+                      
+                      "edu_level1", "edu_level2", "edu_level_4more",  "edu_no","edu_apprenticeship","edu_other"
+                       )
+
+# 计算相关矩阵
+cor_matrix1 <- cor(Manchester_census[columns_to_test1], use="complete.obs")  # 排除任何NA值
+
+# 绘制相关性矩阵图
+png("corrplot1.png", width = 950, height = 950)  # 增加输出图像的尺寸
+corrplot(cor_matrix1, method="color", type="upper", order="original",
+         addCoef.col = "black", # 添加相关系数
+         tl.col="black", tl.srt=45)  # 调整标签颜色和角度
+
+
+```
+
+
+```{r}
+# 定义原始列名和新列名的映射
+columns_to_test <- c("Mean_price_M", "population", "bedrooms_2", "bedrooms_3", "bedrooms_4more",
+                     "centralheating_no", "cars_2", "cars_3more","cars_no",
+                     "workstatus_pt", "workstatus_retired", "workstatus_other","workstatus_student",
+                     "workdistance_10to30", "workdistance_30more", "workdistance_home", "workdistance_outside",
+                     "edu_level1", "edu_level2", "edu_level_4more", "edu_no","edu_apprenticeship","edu_other")
+
+# 确保所有列名都存在
+existing_columns <- intersect(columns_to_test, colnames(Manchester_census))
+
+# 创建新的名称映射
+new_names <- c("Mean_price_M", LETTERS[1:length(existing_columns[-1])])
+names(new_names) <- c("Mean_price_M", existing_columns[-1])
+
+# 创建一个新的数据框，只包含我们想要的列，并重命名
+Manchester_census_renamed <- Manchester_census[existing_columns]
+colnames(Manchester_census_renamed) <- new_names[existing_columns]
+
+# 计算相关矩阵
+cor_matrix <- cor(Manchester_census_renamed, use="complete.obs")
+
+# 绘制相关性矩阵图
+png("corrplot_renamed1.png", width = 950, height = 950)
+corrplot(cor_matrix, method="color", type="upper", order="original",
+         addCoef.col = "black",
+         tl.col="black", tl.srt=45)
+dev.off()
+```
+
+
+##调整ing
+
+```{r}
+# FUll
+modelM_1 <- lm(Mean_price_M ~ population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_2+cars_3more
+            +edu_apprenticeship+edu_level_4more+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other++workstatus_student, 
+            data = LSOA_M)
+summary(modelM_1)
+```
+
+```{r}
+library(car)
+vif(modelM_1)
+```
+
+```{r}
+#删除eud_level_4more
+modelM_1 <- lm(Mean_price_M ~ population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_2+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other++workstatus_student, 
+            data = LSOA_M)
+summary(modelM_1)
+```
+```{r}
+library(car)
+vif(modelM_1)
+```
+
+
+```{r}
+#删除cars_2
+modelM_1 <- lm(Mean_price_M ~ population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other++workstatus_student, 
+            data = LSOA_M)
+summary(modelM_1)
+```
+
+```{r}
+library(car)
+vif(modelM_1)
+```
+
+
+
+
+```{r}
+#删除p不显著的
+modelM_1 <- lm(Mean_price_M ~ population 
+            + bedrooms_4more  + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_other+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other++workstatus_student, 
+            data = LSOA_M)
+summary(modelM_1)
+```
+
+##调整
+
+```{r}
+#full
+library(spatialreg)
+model2_M <- lagsarlm(Mean_price_M ~population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_2+cars_3more
+            +edu_apprenticeship+edu_level_4more+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other+workstatus_student, data = LSOA_M,
+               nb2listw(LSOA_knn_M, style="C"), 
+               method = "eigen")
+
+
+
+summary(model2_M)
+```
+
+
+
+
+```{r}
+#删除edu_level_4more
+library(spatialreg)
+model2_M <- lagsarlm(Mean_price_M ~population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_2+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other++workstatus_student, data = LSOA_M,
+               nb2listw(LSOA_knn_M, style="C"), 
+               method = "eigen")
+
+
+
+summary(model2_M)
+```
+
+
+```{r}
+#删除cars2
+library(spatialreg)
+model2_M <- lagsarlm(Mean_price_M ~population 
+            + bedrooms_4more + bedrooms_2 + bedrooms_3 
+            +workdistance_home + workdistance_10to30 + workdistance_30more + workdistance_outside
+            +centralheating_no
+            +cars_no+cars_3more
+            +edu_apprenticeship+edu_other+edu_level1+edu_level2+edu_no
+            +workstatus_pt+workstatus_retired+workstatus_other++workstatus_student, data = LSOA_M,
+               nb2listw(LSOA_knn_M, style="C"), 
+               method = "eigen")
+
+
+
+summary(model2_M)
+```
+
+
+
+```{r}
+#删除p不显著的1
+library(spatialreg)
+model2_M <- lagsarlm(Mean_price_M ~population 
+            + bedrooms_4more + bedrooms_2 
+            +workdistance_home + workdistance_10to30 
+            +centralheating_no
+            +cars_3more
+            +edu_no
+           +workstatus_retired+workstatus_other+workstatus_student, data = LSOA_M,
+               nb2listw(LSOA_knn_M, style="C"), 
+               method = "eigen")
+
+
+
+summary(model2_M)
+```
+
+```{r}
+#删除p不显著的2
+library(spatialreg)
+model2_M <- lagsarlm(Mean_price_M ~population 
+            + bedrooms_4more + bedrooms_2 
+            +workdistance_home + workdistance_10to30 
+            +centralheating_no
+            +cars_3more
+            +edu_no
+           +workstatus_retired+workstatus_student, data = LSOA_M,
+               nb2listw(LSOA_knn_M, style="C"), 
+               method = "eigen")
+
+
+
+summary(model2_M)
+```
+
+```{r}
+tidy(model2_M)
+```
+
+
+```{r}
+glance(model2_M)
+```
+
+```{r}
+AIC(modelM_1, model2_M)
+BIC(modelM_1,model2_M)
+```
+
+
+```{r}
+library(ggplot2)
+
+# 假设您的数据框名为 df，并且包含 Mean_price_B 列
+ggplot(LSOA_M, aes(x = Mean_price_M)) +
+  geom_histogram(aes(y = ..count..), binwidth = 10000, fill = "grey", color = "black") +
+  labs(title = "Distribution of Mean House Prices in Manchester",
+       x = "Mean Price (£)",
+       y = "Count") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::comma) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+# 假设LSOA_B是您的空间数据对象
+qtm(LSOA_M, fill = "Mean_price_M") +
+  
+  tm_compass(
+    type = "8star",
+    position = c("right", "bottom"),
+    size = 2
+  ) +
+  tm_scale_bar(
+    position = c("right", "bottom"),
+    width = 0.15
+  )
+```
+
+
+```{r}
+# 设置tmap绘图模式
+tmap_mode("plot")
+
+# 创建自定义颜色区间和颜色
+breaks <- c(seq(0, 300000, by = 50000), Inf)
+colors <- c(RColorBrewer::brewer.pal(20, "Blues"), "darkblue")
+
+# 绘图
+tm_shape(LSOA_M) +
+  tm_polygons("Mean_price_M",
+              breaks = breaks,
+              palette = colors,
+              border.col = NULL,
+              title = "Mean House Prices of Birmingham in 2021") +
+  tm_layout(legend.outside = TRUE)
+```
+
+```{r}
+tm_shape(LSOA_M) +
+  tm_fill("Mean_price_M", 
+          breaks = seq(0, max(LSOA_M$Mean_price_M, na.rm = TRUE) + 50000, by = 50000),
+          palette = "YlOrRd",
+          title = "Mean Price (£)",
+          legend.format = list(text.separator = "to", fun = function(x) paste0(formatC(x, format = "f", big.mark = ",", digits = 0)))) +
+  tm_borders(alpha = 0.5) +
+  tm_compass(
+    type = "8star",
+    position = c("right", "bottom"),
+    size = 2
+  ) +
+  tm_scale_bar(
+    position = c("right", "bottom"),
+    width = 0.15
+  ) +
+  tm_layout(
+    legend.outside = TRUE,
+    legend.outside.position = "right",
+    frame = FALSE
+  )
+```
+
+
+
+```{r}
+library(ggplot2)
+
+# 假设您的数据框名为 df，并且包含 Mean_price_B 列
+ggplot(LSOA_M, aes(x = population)) +
+  geom_histogram(aes(y = ..count..), binwidth = 500, fill = "grey", color = "black") +
+  labs(title = "Distribution of population density in Manchester",
+       x = "Population Density",
+       y = "Count") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::comma) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+```{r}
+summary(LSOA_M$population)
+```
+```{r}
+# 创建数据框
+data <- data.frame(
+  category = c("1 Car", "2 Cars", "3+ Cars", "No Car"),
+  value = c(524483, 295107, 81255, 324119)
+)
+
+# 计算百分比
+data$percentage <- data$value / sum(data$value) * 100
+
+# 创建饼图
+ggplot(data, aes(x = "", y = value, fill = category)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_stack(vjust = 0.5)) +
+  labs(title = "Distribution of Car Ownership",
+       fill = "Car Ownership Category") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold")) +
+  scale_fill_brewer(palette = "Set2")
+
+```
+
+
+```{r}
+# 加载必要的包
+library(ggplot2)
+library(scales)
+
+# 创建数据框
+data <- data.frame(
+  category = c("1 Car", "2 Cars", "3+ Cars", "No Car"),
+  value = c(524483, 295107, 81255, 324119)
+)
+
+# 计算百分比
+data$percentage <- data$value / sum(data$value) * 100
+
+# 添加总数
+total <- sum(data$value)
+
+# 创建百分比堆积柱状图
+ggplot(data, aes(x = "", y = percentage, fill = factor(category, levels = rev(category)))) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = sprintf("%.1f%%\n%s", percentage, comma(value))), 
+            position = position_stack(vjust = 0.5), size = 3.5) +
+  coord_flip() +  # 将图表横向显示
+  labs(title = "Distribution of Car Ownership in Manchester",
+       
+       x = NULL,
+       y = "Percentage",
+       fill = "Car Ownership Category") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.text.y = element_blank(),  # 移除y轴标签
+        axis.ticks.y = element_blank()) +  # 移除y轴刻度
+  scale_fill_brewer(palette = "Set2", direction = -1) +
+  scale_y_continuous(labels = percent_format(scale = 1))
+
+# 保存图表
+ggsave("manchester_car_ownership.png", width = 10, height = 6, dpi = 300)
+
+```
+```{r}
+# 安装并加载必要的包
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+library(ggplot2)
+
+# 创建数据框
+data <- data.frame(
+  centralheating = c("Has Central Heating", "No Central Heating"),
+  value = c(1207102, 17941)
+)
+
+# 计算总和和百分比
+total <- sum(data$value)
+data$percentage <- data$value / total * 100
+
+# 创建堆叠柱状图
+ggplot(data, aes(x = "", y = value, fill = factor(centralheating, levels = rev(centralheating)))) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = sprintf("%d\n(%.1f%%)", value, percentage)), 
+            position = position_stack(vjust = 0.5), 
+            size = 4) +
+  coord_flip() +  # 将图表横向显示
+  labs(title = "Distribution of Central Heating in Manchester",
+       x = NULL,
+       y = "Number of Households",
+       fill = "Central Heating Status") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.text.y = element_blank(),  # 移除y轴标签
+        axis.ticks.y = element_blank()) +  # 移除y轴刻度
+  scale_fill_manual(values = c("#66c2a5", "#fc8d62")) +  # 自定义颜色
+  scale_y_continuous(labels = scales::comma)  # 使用逗号分隔数字
+
+
+```
+
+```{r}
+
+# 创建数据框
+data <- data.frame(
+  bedrooms = c("1 bedroom", "2 bedrooms", "3 bedrooms", "4 + bedrooms"),
+  value = c(129302, 371463, 523863, 200374)
+)
+
+# 计算总和和百分比
+total <- sum(data$value)
+data$percentage <- data$value / total * 100
+
+# 创建堆叠柱状图
+ggplot(data, aes(x = "", y = value, fill = factor(bedrooms, levels = rev(bedrooms)))) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = sprintf("%d\n(%.1f%%)", value, percentage)), 
+            position = position_stack(vjust = 0.5), 
+            size = 3.5) +
+  coord_flip() +  # 将图表横向显示
+  labs(title = "Distribution of Bedrooms in Manchester",
+       x = NULL,
+       y = "Number of Households",
+       fill = "Number of Bedrooms") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.text.y = element_blank(),  # 移除y轴标签
+        axis.ticks.y = element_blank()) +  # 移除y轴刻度
+  scale_fill_manual(values = c("#66c2a5", "#fc8d62", "#8da0cb", "#e78ac3")) +  # 自定义颜色
+  scale_y_continuous(labels = scales::comma)  # 使用逗号分隔数字
+```
+
+```{r}
+
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(scales)  # For comma formatting of large numbers
+
+# Create data frame for Birmingham
+birmingham_work_distance <- data.frame(
+  status = c("10 to 30 miles", "30+ miles", "Work from home", "Outside Birmingham", "Less than 10 miles"),
+  count = c(194867, 54768, 114069, 63138, 1144955)
+)
+
+# Calculate total population
+total_population <- sum(birmingham_work_distance$count)
+
+# Add percentage column
+birmingham_work_distance <- birmingham_work_distance %>%
+  mutate(percentage = count / total_population * 100)
+
+# Order work distance status by count
+birmingham_work_distance <- birmingham_work_distance %>%
+  mutate(status = fct_reorder(status, count))
+
+# Lollipop chart with count and percentage labels
+ggplot(birmingham_work_distance, aes(x = status, y = count)) +
+  geom_segment(aes(x = status, xend = status, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  geom_text(aes(label = paste0(comma(count), "\n(", round(percentage, 1), "%)")), 
+            vjust = -0.5, size = 3) +  # Add count and percentage labels
+  labs(title = "Distribution of Work Distance in Birmingham",
+       x = "Work Distance",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) +  # Use comma formatting for y-axis labels
+  coord_flip()  # Flip coordinates for better readability of labels
+
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(scales)  # For comma formatting of large numbers
+
+# Create data frame for Manchester
+manchester_work_distance <- data.frame(
+  distance = c("Less than 10 km", "10 to 30 km", "30 km or more", "Work from home", "Work outside"),
+  count = c(550589, 175980, 35662, 384001, 186235)
+)
+
+# Calculate percentages and order by count
+manchester_work_distance <- manchester_work_distance %>%
+  mutate(percentage = count / sum(count) * 100,
+         distance = fct_reorder(distance, count))
+
+# Lollipop chart with count and percentage labels
+ggplot(manchester_work_distance, aes(x = distance, y = count)) +
+  geom_segment(aes(x = distance, xend = distance, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  geom_text(aes(label = paste0(comma(count), "\n(", round(percentage, 1), "%)")), 
+            vjust = -0.5, size = 3) +  # Add count and percentage labels
+  labs(title = "Distribution of Work Distance in Manchester",
+       x = "Work Distance",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) +  # Use comma formatting for y-axis labels
+  coord_flip()  # Flip coordinates for better readability of labels
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(scales)  # For comma formatting of large numbers
+
+# Create data frame for Manchester
+manchester_education <- data.frame(
+  edu_level = c("Level 1", "Level 2", "Level 3", "Level 4+", "No qualifications", "Apprenticeship", "Other"),
+  count = c(227767, 315673, 403047, 761762, 470159, 132738, 61946)
+)
+
+# Calculate total population and percentages
+total_population <- sum(manchester_education$count)
+manchester_education <- manchester_education %>%
+  mutate(percentage = count / total_population * 100)
+
+# Order education levels by count
+manchester_education <- manchester_education %>%
+  mutate(edu_level = fct_reorder(edu_level, count))
+
+# Lollipop chart
+ggplot(manchester_education, aes(x = edu_level, y = count)) +
+  geom_segment(aes(x = edu_level, xend = edu_level, y = 0, yend = count), 
+               color = "skyblue", size = 1) +
+  geom_point(color = "darkblue", size = 4) +
+  geom_text(aes(label = paste0(comma(count), "\n(", round(percentage, 1), "%)")), 
+            vjust = -0.5, size = 3) +  # Add count and percentage labels
+  labs(title = "Distribution of Education Level in Manchester",
+       x = "Education Level",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) +  # Use comma formatting for y-axis labels
+  coord_flip()
+```
+
+
+```{r}
+library(ggspatial)
+ggplot() +
+  geom_sf(data = LSOA_M, aes(fill = population), color = NA) +
+  scale_fill_viridis(option = "plasma", name = "Population") +
+  theme_minimal() +
+  labs(title = "Population Distribution in Manchester",
+       subtitle = "Based on LSOA boundaries") +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank()) +
+  annotation_scale(location = "br", width_hint = 0.3) +
+  annotation_north_arrow(location = "br", which_north = "true",
+                         pad_x = unit(0.2, "in"), pad_y = unit(0.2, "in"),
+                         style = north_arrow_fancy_orienteering)
+```
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(scales)  # For comma formatting of large numbers
+
+# Create data frame for Manchester
+manchester_work_status <- data.frame(
+  status = c("Full-time", "Part-time", "Retired", "Other", "Student"),
+  count = c(24120, 8586, 460431, 85781, 151945)
+)
+
+# Calculate total population
+total_population <- sum(manchester_work_status$count)
+
+# Add percentage column
+manchester_work_status <- manchester_work_status %>%
+  mutate(percentage = count / total_population * 100)
+
+# Order work status by count
+manchester_work_status <- manchester_work_status %>%
+  mutate(status = fct_reorder(status, count))
+
+# Lollipop chart with count and percentage labels
+ggplot(manchester_work_status, aes(x = status, y = count)) +
+  geom_segment(aes(x = status, xend = status, y = 0, yend = count), color = "skyblue") +
+  geom_point(color = "darkblue", size = 4) +
+  geom_text(aes(label = paste0(comma(count), "\n(", round(percentage, 1), "%)")), 
+            vjust = -0.5, size = 3) +  # Add count and percentage labels
+  labs(title = "Distribution of Work Status in Manchester",
+       x = "Work Status",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) +  # Use comma formatting for y-axis labels
+  coord_flip()  # Flip coordinates for better readability of labels
+
+```
+```{r}
+summary(LSOA_M$Mean_price_M)
+```
+
